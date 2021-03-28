@@ -8,11 +8,12 @@
 #define PREFETCH_DEGREE 1
 #define SCOREMAX 31
 #define ROUNDMAX 100
+#define offset_count 34
 using namespace std;
 
 int round_count = 0;
 
-int current_offset = 2;
+int current_offset = 0;
 
 map<uint8_t, uint16_t> RR_Table;
 
@@ -30,17 +31,19 @@ void CACHE::l2c_prefetcher_initialize()
 	
 	uint16_t RR_initial_Tag = 0;
 	for(uint8_t i=0;i<RR_Count;i++){
-		RR_Table[i] = RR_initial_Tag; 	
+		//RR_Table[i] = RR_initial_Tag;
+		RR_Table.insert({i,RR_initial_Tag}); 	
 	}
 	
-	for(int i=0;i<sizeof(offset_list);i++){
-		offset_score_table[offset_list[i]] = 0;
+	for(int i=0;i<offset_count;i++){
+		//offset_score_table[offset_list[i]] = 0;
+		offset_score_table.insert({offset_list[i],0});
 	}
 }
 
 void reset_offset_table(){
 	
-	for(int i=0;i<sizeof(offset_list);i++){
+	for(int i=0;i<offset_count;i++){
 		offset_score_table[offset_list[i]] = 0;
 	}
 	round_count = 0;
@@ -61,7 +64,8 @@ int check_max(){
         	}
     	}
     
-    	if(entryWithMaxValue.second == 31){
+    	if(entryWithMaxValue.second >= 31){
+    		cout<<"Came to max check"<<endl;
     		return 1;
     	}
     
@@ -114,7 +118,7 @@ int find_max(){
             		entryWithMaxValue = make_pair(currentEntry->first, currentEntry->second);
         	}
     	}
-    
+    	//cout << "max value is : " << entryWithMaxValue.second << endl;
     	return entryWithMaxValue.first;
 }
 
@@ -131,10 +135,21 @@ uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
 	
 	//uint64_t rf_addr = addr;
 	
-	if(round_count == 100 || check_max()){
+	if(round_count >= 100 ){
 		current_offset = find_max();
+		cout << "hello"<<current_offset << endl;
 		reset_offset_table();
 	}
+	
+	
+	if(check_max()){
+		current_offset = find_max();
+		cout << "hello1"<<current_offset << endl;
+		reset_offset_table();
+	}
+	
+	cout << "count of round" << round_count << endl;
+	//cout << "Check_max" << check_max()<< endl;
 	
 	uint64_t dummy_addr;
 	//offset_score_table[offset_list[i]] = offset_score_table[offset_list[i]] + 1
@@ -144,6 +159,7 @@ uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
 		dummy_addr = ((addr>>LOG2_BLOCK_SIZE)-offset_list[i]) << LOG2_BLOCK_SIZE;
 		if(find_in_RR(dummy_addr)){
 			offset_score_table[offset_list[i]] = offset_score_table[offset_list[i]] + 1;
+			//cout << "Found in RR "<< offset_score_table[offset_list[i]]<< endl;
 		}
 	}
 	
@@ -152,14 +168,16 @@ uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
 	//current_offset = find_max();
 	uint64_t pf_addr = ((addr>>LOG2_BLOCK_SIZE)+current_offset) << LOG2_BLOCK_SIZE;
 	//uint64_t pf_addr = addr + offset;
-	 if (MSHR.occupancy < (MSHR.SIZE>>1))
+	 if (MSHR.occupancy < (MSHR.SIZE>>1)){
 	      if(prefetch_line(ip, addr, pf_addr, FILL_L2, 0)){
 		add_to_RR(addr);
 		}
-         else
+	}
+        else{
          	if( prefetch_line(ip, addr, pf_addr, FILL_LLC, 0)){
 		add_to_RR(addr);
 		}
+	}
 	     
 	
 	
