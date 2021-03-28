@@ -1,4 +1,5 @@
 // Reference: Adaptive Insertion Policies for High Performance Caching, Qureshi et. al.
+// Refer to section 4 of the paper above
 // Implemented by Shubhayu Das, IMT2018523
 
 #include "cache.h"
@@ -48,7 +49,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
         }
     }
 
-	// If there are no empty ways, then evict the LRU position entry
+	// If there are no empty ways, then evict the entry which was least recently used (LRU)
 	if(way == LLC_WAY){
         for (way=0; way<LLC_WAY; way++) {
             if (block[set][way].lru > block[set][max_way].lru) {
