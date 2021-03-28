@@ -1,0 +1,157 @@
+#include "ooo_cpu.h"
+
+
+#define META_TABLE_SIZE 16384
+#define META_PRIME 16381
+#define MAX_COUNTER 3
+int META_table[NUM_CPUS][META_TABLE_SIZE];
+
+#define IP_LENGTH_FOR_HASHING 14
+#define PHT_SIZE int(pow(2,IP_LENGTH_FOR_HASHING)) //PHT table size
+#define PER_BRANCH_HISTORY_LENGTH 4
+#define PER_BRANCH_HISTORY_MASK (1 << PER_BRANCH_HISTORY_LENGTH) - 1 
+int per_branch_history_table[NUM_CPUS][PHT_SIZE];
+#define BRANCH_HISTORY_TABLE_SIZE 16384
+int branch_history_table[NUM_CPUS][BRANCH_HISTORY_TABLE_SIZE];
+
+#define GLOBAL_HISTORY_LENGTH 14
+#define GLOBAL_HISTORY_MASK (1 << GLOBAL_HISTORY_LENGTH) - 1
+int branch_history_vector[NUM_CPUS];
+#define GS_HISTORY_TABLE_SIZE 16384
+int gs_history_table[NUM_CPUS][GS_HISTORY_TABLE_SIZE];
+
+
+
+int my_last_prediction[NUM_CPUS][2];
+
+void O3_CPU::initialize_branch_predictor()
+{
+    cout << "CPU " << cpu << " Bimodal branch predictor" << endl;
+
+    for(int i = 0; i < META_TABLE_SIZE; i++)
+        META_table[cpu][i] = 1; // 1 is sligtly gshare
+    my_last_prediction[cpu][0] = 0;
+    my_last_prediction[cpu][1] = 0;
+    //pshare initialisation
+    for(int i=0;i<PHT_SIZE;i++){
+    	per_branch_history_table[cpu][i] = 0;
+    }
+    for(int i=0; i<BRANCH_HISTORY_TABLE_SIZE; i++)
+        branch_history_table[cpu][i] = 2; // 2 is slightly taken
+
+    //gshare initialisation
+    branch_history_vector[cpu] = 0;
+    for(int i=0; i<GS_HISTORY_TABLE_SIZE; i++)
+        gs_history_table[cpu][i] = 2; // 2 is slightly taken
+}
+unsigned int ps_table_hash(uint64_t ip, int pbh_vector)
+{
+    unsigned int hash = ip^(ip>>IP_LENGTH_FOR_HASHING)^(ip>>(IP_LENGTH_FOR_HASHING*2))^pbh_vector;
+    hash = hash%BRANCH_HISTORY_TABLE_SIZE;
+
+    //printf("%d\n", hash);
+
+    return hash;
+}
+uint8_t ps_predict_branch(uint64_t ip,int cpu)
+{
+    int prediction = 1;
+    
+    int ps_hash = ps_table_hash(ip, per_branch_history_table[cpu][ip % PHT_SIZE]);
+
+    if(branch_history_table[cpu][ps_hash] >= 2)
+        prediction = 1;
+    else
+        prediction = 0;
+
+    return prediction;
+}
+void ps_last_branch_result(uint64_t ip, uint8_t taken,int cpu)
+{
+    int ps_hash = ps_table_hash(ip, per_branch_history_table[cpu][ip % PHT_SIZE]);
+
+    if(taken == 1) {
+        if(branch_history_table[cpu][ps_hash] < 3)
+            branch_history_table[cpu][ps_hash]++;
+    } else {
+        if(branch_history_table[cpu][ps_hash] > 0)
+            branch_history_table[cpu][ps_hash]--;
+    }
+
+    // update branch history vector
+    per_branch_history_table[cpu][ip % PHT_SIZE] <<= 1;
+    per_branch_history_table[cpu][ip % PHT_SIZE] &= PER_BRANCH_HISTORY_MASK;
+    per_branch_history_table[cpu][ip % PHT_SIZE] |= taken;
+}
+unsigned int gs_table_hash(uint64_t ip, int bh_vector)
+{
+    unsigned int hash = ip^(ip>>GLOBAL_HISTORY_LENGTH)^(ip>>(GLOBAL_HISTORY_LENGTH*2))^bh_vector;
+    hash = hash%GS_HISTORY_TABLE_SIZE;
+
+    //printf("%d\n", hash);
+
+    return hash;
+}
+uint8_t gs_predict_branch(uint64_t ip,int cpu)
+{
+    int prediction = 1;
+
+    int gs_hash = gs_table_hash(ip, branch_history_vector[cpu]);
+
+    if(gs_history_table[cpu][gs_hash] >= 2)
+        prediction = 1;
+    else
+        prediction = 0;
+
+    return prediction;
+}
+void gs_last_branch_result(uint64_t ip, uint8_t taken,int cpu)
+{
+    int gs_hash = gs_table_hash(ip, branch_history_vector[cpu]);
+
+    if(taken == 1) {
+        if(gs_history_table[cpu][gs_hash] < 3)
+            gs_history_table[cpu][gs_hash]++;
+    } else {
+        if(gs_history_table[cpu][gs_hash] > 0)
+            gs_history_table[cpu][gs_hash]--;
+    }
+
+    // update branch history vector
+    branch_history_vector[cpu] <<= 1;
+    branch_history_vector[cpu] &= GLOBAL_HISTORY_MASK;
+    branch_history_vector[cpu] |= taken;
+}
+
+uint8_t O3_CPU::predict_branch(uint64_t ip)
+{
+    uint32_t meta_hash = ip % META_PRIME;
+    uint8_t prediction0 = ps_predict_branch(ip,cpu);
+    uint8_t prediction1 = gs_predict_branch(ip,cpu);
+    
+    my_last_prediction[cpu][0] = prediction0;
+    my_last_prediction[cpu][1] = prediction1;
+
+    if(META_table[cpu][meta_hash] >= ((MAX_COUNTER + 1)/2)){
+        return prediction0;
+    }
+    else{
+        return prediction1;
+    }
+}
+
+void O3_CPU::last_branch_result(uint64_t ip, uint8_t taken)
+{
+    uint32_t meta_hash = ip % META_PRIME;
+
+    if(my_last_prediction[cpu][0] == taken && my_last_prediction[cpu][1] != taken && META_table[cpu][meta_hash] < MAX_COUNTER){
+        META_table[cpu][meta_hash]++;
+    }
+    else if(my_last_prediction[cpu][0] != taken && my_last_prediction[cpu][1] == taken && META_table[cpu][meta_hash] > 0){
+        META_table[cpu][meta_hash]--;
+    }
+    ps_last_branch_result(ip,taken,cpu);
+    gs_last_branch_result(ip,taken,cpu);
+}
+
+

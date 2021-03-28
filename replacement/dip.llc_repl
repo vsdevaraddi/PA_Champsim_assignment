@@ -1,0 +1,140 @@
+// Reference: Adaptive Insertion Policies for High Performance Caching, Qureshi et. al., Section 5
+// Implemented by Shubhayu Das, IMT2018523
+
+/*
+ * The paper mentions the use of dynamic set sampling(DSS), for DIP-SD (dynamic Insertion Policy - set dueling).
+ * In this policy, we use set dueling on certain "dedicated" sets only. The remaining "follower" sets follow what their
+ * corresponding dedicated set follows. This helps in significantly reducing the hardware needed for the implementation
+ * of DIP-Global, basically needs duplicate memory for LIP and BIP.
+ *
+ * I am going to have 64 sets per way dedicated to LIP and BIP, when there are 2048 sets. This translates to every 63rd
+ * set belonging to LIP and every 64th way belonging to BIP.(Note that counting will actually start from 0)
+ */
+
+#include "cache.h"
+
+#define PSEL_MAX 1023	// Equivalent to a 10 bit PSEL
+#define MAX_LRU_POS LLC_WAY
+#define BIMODAL_THROTTLE 6		// 0.06 actually, but the way I am doing it, you need to enter the percentage(6%)
+
+// N_DEDICATED_SETS has to be more than 2
+// It must also divide LLC_SET without any remainder
+#define N_DEDICATED_SETS 64
+
+#define IS_LIP_POS(x) (x % N_DEDICATED_SETS == (N_DEDICATED_SETS - 2))
+#define IS_BIP_POS(x) (x % N_DEDICATED_SETS == (N_DEDICATED_SETS - 1))
+#define IS_FOLLOWER(x) (x % N_DEDICATED_SETS < (N_DEDICATED_SETS - 2))
+
+uint16_t PSEL[LLC_WAY];
+
+void CACHE::llc_initialize_replacement()
+{
+	// Safety checks
+	if(N_DEDICATED_SETS < 3){
+		cerr << "Number of dedicated sets has to be more than 2\n";
+		assert(0);
+	}
+	else if(LLC_SET % N_DEDICATED_SETS != 0){
+		cerr << "The number of dedicated sets must divide the number of sets in the LLC without any errors" << endl;
+		cerr << "Currently: LLC_SET=" << LLC_SET << " and N_DEDICATED_SETS=" << N_DEDICATED_SETS << " in replacement/dip.llc_repl" << endl;
+		assert(0);
+	}
+
+	// Initialize the sets, depending on their initial policy
+	// The default policy is LRU, because the MSB of PSEL is 0
+	for (uint32_t i=0; i<LLC_SET; i++) {
+		for (uint32_t j=0; j<LLC_WAY; j++) {
+				if(IS_BIP_POS(i))
+					block[i][j].lru = MAX_LRU_POS;
+				else
+					block[i][j].lru = 0;
+
+				PSEL[j] = 0;
+		}
+	}
+
+	cout << "Initialized the DIP state\n\n";
+}
+
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit)
+{
+    if (hit && (type == WRITEBACK)) // writeback hit does not update LRU state
+		return;
+	else if(hit){
+		if(block[set][way].lru > 0)
+			block[set][way].lru--;	// Only if block is reused, then promote towards MRU
+	}
+	// If it is a miss, then update PSEL accordingly
+	else{
+		if(IS_LIP_POS(set))
+			PSEL[way] = (PSEL[way]+1) % PSEL_MAX;
+		else if(IS_BIP_POS(set) && PSEL[way] > 0)
+			PSEL[way]--;
+	}
+}
+
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
+{
+    uint32_t way = 0, max_way = 0;
+
+    // If there are empty cache ways, then fill them first
+	// This code is directly taken from base_replacement.cc
+    for (way=0; way<LLC_WAY; way++) {
+        if (block[set][way].valid == false) {
+
+            DP ( if (warmup_complete[cpu]) {
+            cout << "[" << NAME << "] " << __func__ << " instr_id: " << instr_id << " invalid set: " << set << " way: " << way;
+            cout << hex << " address: " << (full_addr>>LOG2_BLOCK_SIZE) << " victim address: " << block[set][way].address << " data: " << block[set][way].data;
+            cout << dec << " lru: " << block[set][way].lru << endl; });
+
+            break;
+        }
+    }
+
+	// If there are no empty ways, then evict the entry which was least recently used (LRU)
+	if(way == LLC_WAY){
+        for (way=0; way<LLC_WAY; way++) {
+            if (block[set][way].lru > block[set][max_way].lru) {
+				max_way = way;
+            }
+			DP ( if (warmup_complete[cpu]) {
+			cout << "[" << NAME << "] " << __func__ << " instr_id: " << instr_id << " replace set: " << set << " way: " << max_way;
+			cout << hex << " address: " << (full_addr>>LOG2_BLOCK_SIZE) << " victim address: " << block[set][max_way].address << " data: " << block[set][max_way].data;
+			cout << dec << " lru: " << block[set][max_way].lru << endl; });
+		}
+	}
+	else
+		max_way = way;
+
+	// Cause an error if no free slot was found
+    if (max_way == LLC_WAY) {
+        cerr << "[" << NAME << "] " << __func__ << " no victim! set: " << set << endl;
+        assert(0);
+    }
+
+	// Now perform the DIP, based on the set
+	if(IS_LIP_POS(set) || (IS_FOLLOWER(set) && PSEL[max_way] < ((PSEL_MAX + 1)/2))){
+		// the set is a LIP dedicated set
+		// perform LIP, because MSB is 0 and is a follower
+
+		if(block[set][max_way].lru > 0)
+			block[set][max_way].lru = 0;
+	}
+	else if(IS_BIP_POS(set) || (IS_FOLLOWER(set) && PSEL[max_way] >= ((PSEL_MAX + 1)/2))){
+		// perform BIP
+		// With a small probability, new entry is promoted to MRU position
+		if((rand() % 100) <= BIMODAL_THROTTLE)
+			block[set][max_way].lru = 0;
+
+		// Otherwise, for normal LRU insertion policy(LIP), insert into LRU positions
+		else if(block[set][max_way].lru > 0)
+			block[set][max_way].lru = MAX_LRU_POS;
+	}
+
+	return max_way;
+}
+
+void CACHE::llc_replacement_final_stats()
+{
+
+}
